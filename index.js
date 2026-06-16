@@ -67,7 +67,10 @@ async function fetchRailwayProjects() {
             headers: { 'Authorization': `Bearer ${RAILWAY_API}`, 'Content-Type': 'application/json' }
         });
         return response.data.data.projects.edges.map(e => e.node).filter(p => !p.name.toLowerCase().includes('backup'));
-    } catch (e) { return []; }
+    } catch (e) { 
+        console.error("Railway Fetch Error:", e.message);
+        return []; 
+    }
 }
 
 async function generateAndSendBackup(projName, chatId) {
@@ -141,6 +144,8 @@ async function generateAndSendBackup(projName, chatId) {
 // AUTO BACKUP MENU HELPERS
 // ==========================================
 async function showAutoBackupMenu(chatId, messageId = null) {
+    if (!configCol) throw new Error("Database not connected yet.");
+
     const projects = await fetchRailwayProjects();
     let doc = await configCol.findOne({ _id: 'autoList' });
     let autoProjects = doc && doc.projects ? doc.projects : [];
@@ -152,30 +157,38 @@ async function showAutoBackupMenu(chatId, messageId = null) {
         const statusIcon = isAuto ? '✅' : '❌';
         kb.inline_keyboard.push([{
             text: `${statusIcon} ${p.name}`,
-            callback_data: `toggle_auto_${p.name}`
+            callback_data: `ta_${p.name}` // Changed to ta_ to prevent 64 byte error
         }]);
     });
 
-    // Add a back button
     kb.inline_keyboard.push([{ text: '🔙 Back to Main Menu', callback_data: 'main_menu' }]);
 
     const text = "⏰ <b>Auto Backup Settings</b>\n\nSet your projects to backup automatically everyday at <b>12:00 AM</b> and <b>12:00 PM</b>.\n\nClick on a project to Enable (✅) or Disable (❌):";
 
-    if (messageId) {
-        bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: kb });
-    } else {
-        bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: kb });
+    try {
+        if (messageId) {
+            await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: kb });
+        } else {
+            await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: kb });
+        }
+    } catch (err) {
+        // Ignore "message is not modified" error which happens if user clicks the same button quickly
+        if (!err.message.includes("message is not modified")) {
+            console.error("Telegram Edit Message Error:", err.message);
+        }
     }
 }
 
 async function toggleAutoBackup(projName) {
+    if (!configCol) return;
+    
     let doc = await configCol.findOne({ _id: 'autoList' });
     let projects = doc && doc.projects ? doc.projects : [];
 
     if (projects.includes(projName)) {
-        projects = projects.filter(p => p !== projName); // Remove from list
+        projects = projects.filter(p => p !== projName); // Remove
     } else {
-        projects.push(projName); // Add to list
+        projects.push(projName); // Add
     }
 
     await configCol.updateOne(
@@ -197,11 +210,13 @@ function sendMainMenu(chatId, messageId = null) {
     };
     const text = "⚡️ <b>SPADE BACKUP BOT ACTIVE</b>\n\nSelect an option below:";
     
-    if (messageId) {
-        bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: kb });
-    } else {
-        bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: kb });
-    }
+    try {
+        if (messageId) {
+            bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: kb });
+        } else {
+            bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: kb });
+        }
+    } catch (e) {}
 }
 
 bot.onText(/\/start/, (msg) => {
@@ -211,31 +226,42 @@ bot.onText(/\/start/, (msg) => {
 
 bot.on('callback_query', async (q) => {
     if (q.message.chat.id.toString() !== ADMIN_CHAT_ID) return;
-    const data = q.data;
     
-    if (data === 'main_menu') {
-        sendMainMenu(q.message.chat.id, q.message.message_id);
-    } 
-    else if (data === 'fetch') {
-        bot.sendMessage(q.message.chat.id, "⏳ Fetching projects...");
-        const projects = await fetchRailwayProjects();
-        const kb = { inline_keyboard: projects.map(p => [{ text: `📦 ${p.name}`, callback_data: `run_${p.name}` }]) };
-        kb.inline_keyboard.push([{ text: '🔙 Back', callback_data: 'main_menu' }]);
-        bot.editMessageText("Select project to backup manually:", { chat_id: q.message.chat.id, message_id: q.message.message_id, reply_markup: kb });
-    } 
-    else if (data.startsWith('run_')) {
-        const projName = data.replace('run_', '');
-        bot.sendMessage(q.message.chat.id, `⚙️ Generating manual backup for <b>${projName}</b>...`, { parse_mode: 'HTML' });
-        generateAndSendBackup(projName, q.message.chat.id);
-    } 
-    // Yahan Auto Backup ke button handle ho rahe hain
-    else if (data === 'auto') {
-        await showAutoBackupMenu(q.message.chat.id, q.message.message_id);
-    } 
-    else if (data.startsWith('toggle_auto_')) {
-        const projName = data.replace('toggle_auto_', '');
-        await toggleAutoBackup(projName);
-        await showAutoBackupMenu(q.message.chat.id, q.message.message_id); // Refresh menu to show tick/cross
+    const data = q.data;
+    const chatId = q.message.chat.id;
+    const msgId = q.message.message_id;
+
+    try {
+        if (data === 'main_menu') {
+            sendMainMenu(chatId, msgId);
+        } 
+        else if (data === 'fetch') {
+            await bot.editMessageText("⏳ Fetching projects...", { chat_id: chatId, message_id: msgId });
+            const projects = await fetchRailwayProjects();
+            const kb = { inline_keyboard: projects.map(p => [{ text: `📦 ${p.name}`, callback_data: `run_${p.name}` }]) };
+            kb.inline_keyboard.push([{ text: '🔙 Back', callback_data: 'main_menu' }]);
+            bot.editMessageText("Select project to backup manually:", { chat_id: chatId, message_id: msgId, reply_markup: kb });
+        } 
+        else if (data.startsWith('run_')) {
+            const projName = data.replace('run_', '');
+            bot.sendMessage(chatId, `⚙️ Generating manual backup for <b>${projName}</b>...`, { parse_mode: 'HTML' });
+            generateAndSendBackup(projName, chatId);
+        } 
+        else if (data === 'auto') {
+            await showAutoBackupMenu(chatId, msgId);
+        } 
+        else if (data.startsWith('ta_')) {
+            const projName = data.replace('ta_', ''); // Using short prefix now
+            await toggleAutoBackup(projName);
+            await showAutoBackupMenu(chatId, msgId);
+        }
+        
+        // This stops the loading icon on the button
+        bot.answerCallbackQuery(q.id).catch(() => {});
+
+    } catch (error) {
+        console.error("Callback Error:", error.message);
+        bot.answerCallbackQuery(q.id, { text: "Error loading! DB not connected or check logs.", show_alert: true }).catch(() => {});
     }
 });
 
@@ -243,6 +269,7 @@ bot.on('callback_query', async (q) => {
 // CRON JOB (12 AM and 12 PM Everyday)
 // ==========================================
 cron.schedule('0 0,12 * * *', async () => {
+    if (!configCol) return;
     let doc = await configCol.findOne({ _id: 'autoList' });
     if (doc && doc.projects && doc.projects.length > 0) {
         bot.sendMessage(ADMIN_CHAT_ID, `⏰ <b>Scheduled Auto Backup Started!</b>\nTriggering for ${doc.projects.length} projects...`, { parse_mode: 'HTML' });
