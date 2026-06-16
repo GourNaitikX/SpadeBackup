@@ -20,7 +20,34 @@ if (!BOT_TOKEN || !MONGO_URL || !GITHUB_API || !RAILWAY_API || !ADMIN_CHAT_ID) {
     process.exit(1);
 }
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: { params: { drop_pending_updates: true } } });
+// Added timeout parameters to help mitigate Gateway Timeouts
+const bot = new TelegramBot(BOT_TOKEN, { 
+    polling: { 
+        params: { 
+            drop_pending_updates: true,
+            timeout: 10 
+        } 
+    } 
+});
+
+// ==========================================
+// ANTI-CRASH ERROR HANDLERS (Fix for 504 Gateway Timeout)
+// ==========================================
+bot.on('polling_error', (error) => {
+    console.log(`[Polling Error] ${error.code || 'UNKNOWN'}: ${error.message}`);
+});
+
+bot.on('error', (error) => {
+    console.log(`[Bot Error] ${error.code || 'UNKNOWN'}: ${error.message}`);
+});
+
+process.on('uncaughtException', (err) => {
+    console.log(`[Uncaught Exception] ${err.message}`);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.log(`[Unhandled Rejection] ${reason}`);
+});
 
 // ==========================================
 // MONGODB SETUP
@@ -29,10 +56,14 @@ const client = new MongoClient(MONGO_URL);
 let db, configCol;
 
 async function initDB() {
-    await client.connect();
-    db = client.db('SpadeBackupDB');
-    configCol = db.collection('auto_backup_settings');
-    console.log("✅ MongoDB Connected!");
+    try {
+        await client.connect();
+        db = client.db('SpadeBackupDB');
+        configCol = db.collection('auto_backup_settings');
+        console.log("✅ MongoDB Connected!");
+    } catch (err) {
+        console.error("❌ MongoDB Connection Error:", err.message);
+    }
 }
 initDB();
 
@@ -56,7 +87,6 @@ async function fetchRailwayProjects() {
             headers: { 'Authorization': `Bearer ${RAILWAY_API}`, 'Content-Type': 'application/json' }
         });
         const projects = response.data.data.projects.edges.map(edge => edge.node);
-        // Remove master backup bot from the list to avoid backing up the backup bot itself
         return projects.filter(p => !p.name.toLowerCase().includes('backup')); 
     } catch (e) {
         console.error("Railway API Error:", e.response ? e.response.data : e.message);
@@ -80,30 +110,31 @@ async function generateAndSendBackup(projectName, chatId) {
         
         for (const file of filesToFetch) {
             try {
-                // Assuming GitHub Username is GourNaitikX and Repo matches Railway Project Name
+                // Ensure your GitHub username here is correct
                 const url = `https://api.github.com/repos/GourNaitikX/${projectName}/contents/${file}`;
                 const res = await axios.get(url, { headers: githubHeaders });
                 const fileContent = await axios.get(res.data.download_url);
                 fs.writeFileSync(path.join(backupDir, file), typeof fileContent.data === 'object' ? JSON.stringify(fileContent.data, null, 2) : fileContent.data);
             } catch (e) {
-                // Ignore if file not found (e.g. backup.js might not exist in all repos)
+                // Skip silently if a specific file like backup.js doesn't exist
             }
         }
 
-        // 2. Try Fetching MongoDB Data via target Bot's custom endpoint (if it exists)
+        // 2. Fetching MongoDB Data via target Bot's custom endpoint
         try {
             const dbUrl = `https://${projectName.toLowerCase()}.up.railway.app/get-data?key=MERA_SECRET_KEY_123`;
-            const dbRes = await axios.get(dbUrl, { timeout: 10000 }); // 10 sec timeout
+            const dbRes = await axios.get(dbUrl, { timeout: 10000 }); 
             if (dbRes.data) {
                 const dbFolder = path.join(backupDir, 'Database');
-                fs.mkdirSync(dbFolder);
+                if (!fs.existsSync(dbFolder)) fs.mkdirSync(dbFolder);
                 fs.writeFileSync(path.join(dbFolder, 'database_dump.json'), JSON.stringify(dbRes.data, null, 2));
             }
         } catch (e) {
-            // Target bot might be sleeping or endpoint doesn't exist. Proceed without crashing.
+            // Fails gracefully if the target database API is not deployed or unreachable
+            console.log(`Skipping DB for ${projectName}: Endpoint unreachable.`);
         }
 
-        // 3. Zip it all
+        // 3. Create Zip
         await new Promise((resolve, reject) => {
             const output = fs.createWriteStream(zipName);
             const archive = archiver('zip', { zlib: { level: 9 } });
@@ -159,7 +190,9 @@ bot.on('callback_query', async (query) => {
         let loadMsg = await bot.sendMessage(ADMIN_CHAT_ID, `${frames[0]} ${text}...`);
         for (let i = 1; i < 4; i++) {
             await delay(400);
-            await bot.editMessageText(`${frames[i]} ${text}...`, { chat_id: ADMIN_CHAT_ID, message_id: loadMsg.message_id });
+            try {
+                await bot.editMessageText(`${frames[i]} ${text}...`, { chat_id: ADMIN_CHAT_ID, message_id: loadMsg.message_id });
+            } catch(e) {}
         }
         return loadMsg.message_id;
     }
@@ -168,7 +201,7 @@ bot.on('callback_query', async (query) => {
     if (data === 'menu_fetch') {
         const loadingId = await playLoading("Fetching from Railway");
         const projects = await fetchRailwayProjects();
-        bot.deleteMessage(ADMIN_CHAT_ID, loadingId);
+        try { await bot.deleteMessage(ADMIN_CHAT_ID, loadingId); } catch(e) {}
 
         if (projects.length === 0) return bot.sendMessage(ADMIN_CHAT_ID, "❌ Koi project nahi mila!");
 
@@ -188,16 +221,15 @@ bot.on('callback_query', async (query) => {
         
         let status = await bot.sendMessage(ADMIN_CHAT_ID, `⚙️ Processing backup for <b>${projName}</b>...`, { parse_mode: 'HTML' });
         await generateAndSendBackup(projName, ADMIN_CHAT_ID);
-        bot.deleteMessage(ADMIN_CHAT_ID, status.message_id);
+        try { await bot.deleteMessage(ADMIN_CHAT_ID, status.message_id); } catch(e) {}
     }
 
     // 3. AUTO BACKUP CONFIG MENU
     else if (data === 'menu_autobackup') {
         const loadingId = await playLoading("Loading Configuration");
         const projects = await fetchRailwayProjects();
-        bot.deleteMessage(ADMIN_CHAT_ID, loadingId);
+        try { await bot.deleteMessage(ADMIN_CHAT_ID, loadingId); } catch(e) {}
 
-        // Get saved config
         let doc = await configCol.findOne({ _id: 'autoList' });
         let selected = doc ? doc.projects : [];
 
@@ -219,13 +251,12 @@ bot.on('callback_query', async (query) => {
         let selected = doc ? doc.projects : [];
 
         if (selected.includes(projName)) {
-            selected = selected.filter(name => name !== projName); // Remove
+            selected = selected.filter(name => name !== projName); 
         } else {
-            selected.push(projName); // Add
+            selected.push(projName); 
         }
         await configCol.replaceOne({ _id: 'autoList' }, { _id: 'autoList', projects: selected }, { upsert: true });
 
-        // Re-render keyboard seamlessly
         const projects = await fetchRailwayProjects();
         let kb = { inline_keyboard: [] };
         projects.forEach(p => {
@@ -259,7 +290,6 @@ bot.on('callback_query', async (query) => {
 // ==========================================
 // CRON JOB (DAILY 12 AM & 12 PM)
 // ==========================================
-// Schedules at 00:00 and 12:00 everyday.
 cron.schedule('0 0,12 * * *', async () => {
     let doc = await configCol.findOne({ _id: 'autoList' });
     if (!doc || !doc.projects || doc.projects.length === 0) return;
@@ -268,9 +298,11 @@ cron.schedule('0 0,12 * * *', async () => {
 
     for (const projName of doc.projects) {
         await generateAndSendBackup(projName, ADMIN_CHAT_ID);
-        await delay(2000); // 2 sec delay to avoid Telegram rate limits
+        await delay(2000); 
     }
 }, {
     scheduled: true,
     timezone: "Asia/Kolkata"
 });
+
+console.log("✅ Backup Bot Instance Running");
