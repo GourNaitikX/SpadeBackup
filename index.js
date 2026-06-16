@@ -5,6 +5,15 @@ const fs = require('fs');
 const path = require('path');
 const archiver = require('archiver');
 const cron = require('node-cron');
+const express = require('express');
+
+// ==========================================
+// DUMMY WEB SERVER (Prevents Railway SIGTERM Crash)
+// ==========================================
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.get('/', (req, res) => res.send('Spade Master Backup Bot is running actively.'));
+app.listen(PORT, () => console.log(`✅ Dummy server listening on port ${PORT}`));
 
 // ==========================================
 // ENVIRONMENT VARIABLES
@@ -20,7 +29,6 @@ if (!BOT_TOKEN || !MONGO_URL || !GITHUB_API || !RAILWAY_API || !ADMIN_CHAT_ID) {
     process.exit(1);
 }
 
-// Added timeout parameters to help mitigate Gateway Timeouts
 const bot = new TelegramBot(BOT_TOKEN, { 
     polling: { 
         params: { 
@@ -31,23 +39,12 @@ const bot = new TelegramBot(BOT_TOKEN, {
 });
 
 // ==========================================
-// ANTI-CRASH ERROR HANDLERS (Fix for 504 Gateway Timeout)
+// ANTI-CRASH ERROR HANDLERS
 // ==========================================
-bot.on('polling_error', (error) => {
-    console.log(`[Polling Error] ${error.code || 'UNKNOWN'}: ${error.message}`);
-});
-
-bot.on('error', (error) => {
-    console.log(`[Bot Error] ${error.code || 'UNKNOWN'}: ${error.message}`);
-});
-
-process.on('uncaughtException', (err) => {
-    console.log(`[Uncaught Exception] ${err.message}`);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-    console.log(`[Unhandled Rejection] ${reason}`);
-});
+bot.on('polling_error', (error) => console.log(`[Polling Error]: ${error.message}`));
+bot.on('error', (error) => console.log(`[Bot Error]: ${error.message}`));
+process.on('uncaughtException', (err) => console.log(`[Uncaught Exception]: ${err.message}`));
+process.on('unhandledRejection', (reason) => console.log(`[Unhandled Rejection]: ${reason}`));
 
 // ==========================================
 // MONGODB SETUP
@@ -110,14 +107,12 @@ async function generateAndSendBackup(projectName, chatId) {
         
         for (const file of filesToFetch) {
             try {
-                // Ensure your GitHub username here is correct
+                // Assuming GitHub Username is GourNaitikX
                 const url = `https://api.github.com/repos/GourNaitikX/${projectName}/contents/${file}`;
                 const res = await axios.get(url, { headers: githubHeaders });
                 const fileContent = await axios.get(res.data.download_url);
                 fs.writeFileSync(path.join(backupDir, file), typeof fileContent.data === 'object' ? JSON.stringify(fileContent.data, null, 2) : fileContent.data);
-            } catch (e) {
-                // Skip silently if a specific file like backup.js doesn't exist
-            }
+            } catch (e) {}
         }
 
         // 2. Fetching MongoDB Data via target Bot's custom endpoint
@@ -130,7 +125,6 @@ async function generateAndSendBackup(projectName, chatId) {
                 fs.writeFileSync(path.join(dbFolder, 'database_dump.json'), JSON.stringify(dbRes.data, null, 2));
             }
         } catch (e) {
-            // Fails gracefully if the target database API is not deployed or unreachable
             console.log(`Skipping DB for ${projectName}: Endpoint unreachable.`);
         }
 
@@ -190,9 +184,7 @@ bot.on('callback_query', async (query) => {
         let loadMsg = await bot.sendMessage(ADMIN_CHAT_ID, `${frames[0]} ${text}...`);
         for (let i = 1; i < 4; i++) {
             await delay(400);
-            try {
-                await bot.editMessageText(`${frames[i]} ${text}...`, { chat_id: ADMIN_CHAT_ID, message_id: loadMsg.message_id });
-            } catch(e) {}
+            try { await bot.editMessageText(`${frames[i]} ${text}...`, { chat_id: ADMIN_CHAT_ID, message_id: loadMsg.message_id }); } catch(e) {}
         }
         return loadMsg.message_id;
     }
