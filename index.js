@@ -97,13 +97,20 @@ async function generateAndSendBackup(projName, chatId) {
             
             const dbRes = await axios.get(dbUrl, { timeout: 30000 }); // 30 seconds timeout
             
-            // Create Database folder and save as data.json
+                        // Create Database folder and save as individual .json files
             if (dbRes.data && Object.keys(dbRes.data).length > 0) {
                 const dbFolder = path.join(tempDir, 'Database');
                 fs.mkdirSync(dbFolder, { recursive: true });
-                fs.writeFileSync(path.join(dbFolder, 'data.json'), JSON.stringify(dbRes.data, null, 2));
-                dbStatus = "✅ DB Included Successfully";
+
+                // Loop through collections and save each as a separate file
+                for (const [collectionName, content] of Object.entries(dbRes.data)) {
+                    const fileName = `${collectionName}.json`;
+                    fs.writeFileSync(path.join(dbFolder, fileName), JSON.stringify(content, null, 2));
+                }
+                
+                dbStatus = "✅ DB Included (Splitted)";
             }
+
         } catch (e) {
             console.log(`Database fetch failed for ${projName}:`, e.message);
         }
