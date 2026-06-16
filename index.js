@@ -95,14 +95,12 @@ async function generateAndSendBackup(projName, chatId) {
             const formattedDomainName = projName.toLowerCase().replace(/[^a-z0-9-]/g, '');
             const dbUrl = `https://${formattedDomainName}.up.railway.app/get-data?key=Spadebotbackup`;
             
-            const dbRes = await axios.get(dbUrl, { timeout: 30000 }); // 30 seconds timeout
+            const dbRes = await axios.get(dbUrl, { timeout: 30000 }); 
             
-                        // Create Database folder and save as individual .json files
             if (dbRes.data && Object.keys(dbRes.data).length > 0) {
                 const dbFolder = path.join(tempDir, 'Database');
                 fs.mkdirSync(dbFolder, { recursive: true });
 
-                // Loop through collections and save each as a separate file
                 for (const [collectionName, content] of Object.entries(dbRes.data)) {
                     const fileName = `${collectionName}.json`;
                     fs.writeFileSync(path.join(dbFolder, fileName), JSON.stringify(content, null, 2));
@@ -140,41 +138,114 @@ async function generateAndSendBackup(projName, chatId) {
 }
 
 // ==========================================
+// AUTO BACKUP MENU HELPERS
+// ==========================================
+async function showAutoBackupMenu(chatId, messageId = null) {
+    const projects = await fetchRailwayProjects();
+    let doc = await configCol.findOne({ _id: 'autoList' });
+    let autoProjects = doc && doc.projects ? doc.projects : [];
+
+    const kb = { inline_keyboard: [] };
+
+    projects.forEach(p => {
+        const isAuto = autoProjects.includes(p.name);
+        const statusIcon = isAuto ? '✅' : '❌';
+        kb.inline_keyboard.push([{
+            text: `${statusIcon} ${p.name}`,
+            callback_data: `toggle_auto_${p.name}`
+        }]);
+    });
+
+    // Add a back button
+    kb.inline_keyboard.push([{ text: '🔙 Back to Main Menu', callback_data: 'main_menu' }]);
+
+    const text = "⏰ <b>Auto Backup Settings</b>\n\nSet your projects to backup automatically everyday at <b>12:00 AM</b> and <b>12:00 PM</b>.\n\nClick on a project to Enable (✅) or Disable (❌):";
+
+    if (messageId) {
+        bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: kb });
+    } else {
+        bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: kb });
+    }
+}
+
+async function toggleAutoBackup(projName) {
+    let doc = await configCol.findOne({ _id: 'autoList' });
+    let projects = doc && doc.projects ? doc.projects : [];
+
+    if (projects.includes(projName)) {
+        projects = projects.filter(p => p !== projName); // Remove from list
+    } else {
+        projects.push(projName); // Add to list
+    }
+
+    await configCol.updateOne(
+        { _id: 'autoList' },
+        { $set: { projects: projects } },
+        { upsert: true }
+    );
+}
+
+// ==========================================
 // BOT LOGIC
 // ==========================================
-bot.onText(/\/start/, (msg) => {
-    if (msg.chat.id.toString() !== ADMIN_CHAT_ID) return;
+function sendMainMenu(chatId, messageId = null) {
     const kb = { 
         inline_keyboard: [
-            [{ text: '🔄 Fetch Projects', callback_data: 'fetch' }], 
-            [{ text: '⏰ Auto Backup', callback_data: 'auto' }]
+            [{ text: '🔄 Fetch Projects (Manual)', callback_data: 'fetch' }], 
+            [{ text: '⏰ Auto Backup Settings', callback_data: 'auto' }]
         ] 
     };
-    bot.sendMessage(msg.chat.id, "⚡️ <b>SPADE BACKUP BOT ACTIVE</b>\n\nSelect an option below:", { parse_mode: 'HTML', reply_markup: kb });
+    const text = "⚡️ <b>SPADE BACKUP BOT ACTIVE</b>\n\nSelect an option below:";
+    
+    if (messageId) {
+        bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: kb });
+    } else {
+        bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: kb });
+    }
+}
+
+bot.onText(/\/start/, (msg) => {
+    if (msg.chat.id.toString() !== ADMIN_CHAT_ID) return;
+    sendMainMenu(msg.chat.id);
 });
 
 bot.on('callback_query', async (q) => {
     if (q.message.chat.id.toString() !== ADMIN_CHAT_ID) return;
     const data = q.data;
     
-    if (data === 'fetch') {
+    if (data === 'main_menu') {
+        sendMainMenu(q.message.chat.id, q.message.message_id);
+    } 
+    else if (data === 'fetch') {
+        bot.sendMessage(q.message.chat.id, "⏳ Fetching projects...");
         const projects = await fetchRailwayProjects();
         const kb = { inline_keyboard: projects.map(p => [{ text: `📦 ${p.name}`, callback_data: `run_${p.name}` }]) };
-        bot.sendMessage(q.message.chat.id, "Select project to backup:", { reply_markup: kb });
-    } else if (data.startsWith('run_')) {
+        kb.inline_keyboard.push([{ text: '🔙 Back', callback_data: 'main_menu' }]);
+        bot.editMessageText("Select project to backup manually:", { chat_id: q.message.chat.id, message_id: q.message.message_id, reply_markup: kb });
+    } 
+    else if (data.startsWith('run_')) {
         const projName = data.replace('run_', '');
-        bot.sendMessage(q.message.chat.id, `⚙️ Generating backup for <b>${projName}</b>...`, { parse_mode: 'HTML' });
+        bot.sendMessage(q.message.chat.id, `⚙️ Generating manual backup for <b>${projName}</b>...`, { parse_mode: 'HTML' });
         generateAndSendBackup(projName, q.message.chat.id);
+    } 
+    // Yahan Auto Backup ke button handle ho rahe hain
+    else if (data === 'auto') {
+        await showAutoBackupMenu(q.message.chat.id, q.message.message_id);
+    } 
+    else if (data.startsWith('toggle_auto_')) {
+        const projName = data.replace('toggle_auto_', '');
+        await toggleAutoBackup(projName);
+        await showAutoBackupMenu(q.message.chat.id, q.message.message_id); // Refresh menu to show tick/cross
     }
 });
 
 // ==========================================
-// CRON JOB
+// CRON JOB (12 AM and 12 PM Everyday)
 // ==========================================
 cron.schedule('0 0,12 * * *', async () => {
     let doc = await configCol.findOne({ _id: 'autoList' });
-    if (doc && doc.projects) {
-        bot.sendMessage(ADMIN_CHAT_ID, `⏰ <b>Scheduled Auto Backup Started!</b>`, { parse_mode: 'HTML' });
+    if (doc && doc.projects && doc.projects.length > 0) {
+        bot.sendMessage(ADMIN_CHAT_ID, `⏰ <b>Scheduled Auto Backup Started!</b>\nTriggering for ${doc.projects.length} projects...`, { parse_mode: 'HTML' });
         doc.projects.forEach(p => generateAndSendBackup(p, ADMIN_CHAT_ID));
     }
 }, { timezone: "Asia/Kolkata" });
