@@ -1,0 +1,21 @@
+{
+  "name": "spade-master-backup",
+  "version": "1.0.0",
+  "description": "Centralized Automated Backup Bot for Railway & GitHub",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "axios": "^1.7.2",
+    "mongodb": "^6.8.0",
+    "node-cron": "^3.0.3",
+    "node-telegram-bot-api": "^0.66.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Spade",
+  "license": "ISC"
+}
