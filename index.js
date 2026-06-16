@@ -47,7 +47,7 @@ process.on('uncaughtException', (err) => console.log(`[Uncaught Exception]: ${er
 process.on('unhandledRejection', (reason) => console.log(`[Unhandled Rejection]: ${reason}`));
 
 // ==========================================
-// MONGODB SETUP
+// MONGODB SETUP (Master Bot Storage)
 // ==========================================
 const client = new MongoClient(MONGO_URL);
 let db, configCol;
@@ -57,7 +57,7 @@ async function initDB() {
         await client.connect();
         db = client.db('SpadeBackupDB');
         configCol = db.collection('auto_backup_settings');
-        console.log("✅ MongoDB Connected!");
+        console.log("✅ Master MongoDB Connected!");
     } catch (err) {
         console.error("❌ MongoDB Connection Error:", err.message);
     }
@@ -99,6 +99,8 @@ async function generateAndSendBackup(projectName, chatId) {
     const zipName = path.join(__dirname, `${projectName}.zip`);
     
     if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+    
+    let dbStatus = "❌ DB Skipped/Failed";
 
     try {
         // 1. Fetch from GitHub
@@ -107,25 +109,30 @@ async function generateAndSendBackup(projectName, chatId) {
         
         for (const file of filesToFetch) {
             try {
-                // Assuming GitHub Username is GourNaitikX
                 const url = `https://api.github.com/repos/GourNaitikX/${projectName}/contents/${file}`;
                 const res = await axios.get(url, { headers: githubHeaders });
                 const fileContent = await axios.get(res.data.download_url);
                 fs.writeFileSync(path.join(backupDir, file), typeof fileContent.data === 'object' ? JSON.stringify(fileContent.data, null, 2) : fileContent.data);
-            } catch (e) {}
+            } catch (e) {
+                // Ignore silently if a file doesn't exist
+            }
         }
 
         // 2. Fetching MongoDB Data via target Bot's custom endpoint
         try {
-            const dbUrl = `https://${projectName.toLowerCase()}.up.railway.app/get-data?key=MERA_SECRET_KEY_123`;
-            const dbRes = await axios.get(dbUrl, { timeout: 10000 }); 
+            // Assumes you have set a custom Railway domain matching the project name exactly
+            const formattedDomainName = projectName.toLowerCase().replace(/[^a-z0-9-]/g, '');
+            const dbUrl = `https://${formattedDomainName}.up.railway.app/get-data?key=SpadeBotBackup`;
+            
+            const dbRes = await axios.get(dbUrl, { timeout: 15000 }); 
             if (dbRes.data) {
                 const dbFolder = path.join(backupDir, 'Database');
                 if (!fs.existsSync(dbFolder)) fs.mkdirSync(dbFolder);
                 fs.writeFileSync(path.join(dbFolder, 'database_dump.json'), JSON.stringify(dbRes.data, null, 2));
+                dbStatus = "✅ DB Included Successfully";
             }
         } catch (e) {
-            console.log(`Skipping DB for ${projectName}: Endpoint unreachable.`);
+            console.log(`Skipping DB for ${projectName}: Endpoint unreachable. Make sure the Railway domain matches ${projectName.toLowerCase()}.up.railway.app`);
         }
 
         // 3. Create Zip
@@ -140,7 +147,7 @@ async function generateAndSendBackup(projectName, chatId) {
         });
 
         // 4. Send ZIP
-        const caption = `📦 <b>Project:</b> ${projectName}\n📅 <b>Date & Time:</b> ${getFormattedTime()}\n\n✅ <i>Backup successfully generated!</i>`;
+        const caption = `📦 <b>Project:</b> ${projectName}\n📅 <b>Date & Time:</b> ${getFormattedTime()}\n🗄️ <b>Status:</b> ${dbStatus}\n\n✅ <i>Backup successfully generated!</i>`;
         await bot.sendDocument(chatId, zipName, { caption: caption, parse_mode: 'HTML' });
 
     } catch (e) {
@@ -159,7 +166,7 @@ bot.onText(/\/start/, (msg) => {
     if (msg.chat.id.toString() !== ADMIN_CHAT_ID) return;
 
     const welcomeMsg = `⚡️ <b>𝗪𝗘𝗟𝗖𝗢𝗠𝗘 𝗦𝗣𝗔𝗗𝗘 𝗜𝗡 𝗬𝗢𝗨𝗥 𝗕𝗔𝗖𝗞𝗨𝗣 𝗕𝗢𝗧</b> ⚡️\n\n` +
-                       `👨‍💻 Master, aapka centralized backup system ready hai.\n` +
+                       `👨‍💻 Master, your centralized backup system is ready.\n` +
                        `Railway API + GitHub Repo + MongoDB Auto-Sync Active! ✅\n\n` +
                        `👇 <i>Select an option below to proceed:</i>`;
 
@@ -184,7 +191,9 @@ bot.on('callback_query', async (query) => {
         let loadMsg = await bot.sendMessage(ADMIN_CHAT_ID, `${frames[0]} ${text}...`);
         for (let i = 1; i < 4; i++) {
             await delay(400);
-            try { await bot.editMessageText(`${frames[i]} ${text}...`, { chat_id: ADMIN_CHAT_ID, message_id: loadMsg.message_id }); } catch(e) {}
+            try {
+                await bot.editMessageText(`${frames[i]} ${text}...`, { chat_id: ADMIN_CHAT_ID, message_id: loadMsg.message_id });
+            } catch(e) {}
         }
         return loadMsg.message_id;
     }
@@ -195,7 +204,7 @@ bot.on('callback_query', async (query) => {
         const projects = await fetchRailwayProjects();
         try { await bot.deleteMessage(ADMIN_CHAT_ID, loadingId); } catch(e) {}
 
-        if (projects.length === 0) return bot.sendMessage(ADMIN_CHAT_ID, "❌ Koi project nahi mila!");
+        if (projects.length === 0) return bot.sendMessage(ADMIN_CHAT_ID, "❌ No projects found!");
 
         let kb = { inline_keyboard: [] };
         projects.forEach(p => {
@@ -265,13 +274,13 @@ bot.on('callback_query', async (query) => {
     else if (data === 'save_autobackup') {
         let doc = await configCol.findOne({ _id: 'autoList' });
         let count = doc ? doc.projects.length : 0;
-        bot.editMessageText(`✅ <b>Auto Backup Saved!</b>\n\nDaily 12 AM and 12 PM par in ${count} projects ka backup automatically generate hoga.`, { chat_id: ADMIN_CHAT_ID, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Menu', callback_data: 'menu_home' }]] } });
+        bot.editMessageText(`✅ <b>Auto Backup Saved!</b>\n\nDaily at 12 AM and 12 PM, backups for these ${count} projects will be automatically generated.`, { chat_id: ADMIN_CHAT_ID, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Menu', callback_data: 'menu_home' }]] } });
     }
 
     // 6. BACK TO HOME
     else if (data === 'menu_home') {
         const welcomeMsg = `⚡️ <b>𝗪𝗘𝗟𝗖𝗢𝗠𝗘 𝗦𝗣𝗔𝗗𝗘 𝗜𝗡 𝗬𝗢𝗨𝗥 𝗕𝗔𝗖𝗞𝗨𝗣 𝗕𝗢𝗧</b> ⚡️\n\n` +
-                           `👨‍💻 Master, aapka centralized backup system ready hai.\n` +
+                           `👨‍💻 Master, your centralized backup system is ready.\n` +
                            `Railway API + GitHub Repo + MongoDB Auto-Sync Active! ✅\n\n` +
                            `👇 <i>Select an option below to proceed:</i>`;
         const kb = { inline_keyboard: [[{ text: '🔄 Fetch Projects', callback_data: 'menu_fetch' }], [{ text: '⏰ Set Auto Backup', callback_data: 'menu_autobackup' }]] };
